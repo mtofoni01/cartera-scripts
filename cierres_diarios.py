@@ -2,6 +2,7 @@
 cierres_diarios.py
 ------------------
 Obtiene precios de bonos en ARS desde Rava Bursátil,
+volumen operado desde el Mapa del Mercado de Rava,
 convierte a USD usando dólar blue/MEP desde dolarapi.com
 y envía los resultados al backend en Railway.
 """
@@ -20,12 +21,20 @@ load_dotenv()
 API_URL    = os.getenv("API_URL", "https://backend-login-production-6dd0.up.railway.app")
 DOLAR_TIPO = os.getenv("DOLAR_TIPO", "blue")
 
+# Tickers a procesar — cartera propia + seguimiento
 CARTERA = [
     {"ticker_db": "GD30", "ticker_rava": "GD30"},
     {"ticker_db": "AL30", "ticker_rava": "AL30"},
     {"ticker_db": "TX26", "ticker_rava": "TX26"},
 ]
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept":     "text/html,application/xhtml+xml",
+    "Referer":    "https://www.rava.com/"
+}
+
+# ─────────────────────────────────────────────────────────────
 def obtener_dolar() -> float | None:
     try:
         resp = requests.get("https://dolarapi.com/v1/dolares", timeout=10, verify=False)
@@ -37,15 +46,46 @@ def obtener_dolar() -> float | None:
     except:
         return None
 
+
+def obtener_volumenes_rava() -> dict:
+    """
+    Scrapea el Mapa del Mercado de Rava y retorna un dict
+    { ticker: volumen_operado } para todos los bonos disponibles.
+    El volumen viene en ARS (pesos).
+    """
+    volumenes = {}
+    try:
+        url  = "https://www.rava.com/herramientas/mapa-del-mercado"
+        resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+        if resp.status_code != 200:
+            print(f"  [!] Mapa del mercado: HTTP {resp.status_code}")
+            return volumenes
+
+        # El mapa tiene formato: TICKER · +/-X.XX% VOLUMEN · PRECIO · DESCRIPCION
+        # Buscamos patrones como: GD30 · +0.21% 10.738.439.305 · 91990,00
+        patron = re.compile(
+            r'([A-Z0-9]+)\s*·\s*[+-]?\d+[\.,]\d+%\s*([\d\.]+)\s*·',
+            re.MULTILINE
+        )
+        texto = resp.text
+        for match in patron.finditer(texto):
+            ticker  = match.group(1).strip()
+            volumen = match.group(2).replace(".", "").replace(",", "")
+            try:
+                volumenes[ticker] = float(volumen)
+            except:
+                pass
+
+        print(f"  [ok] Mapa del mercado: {len(volumenes)} instrumentos con volumen")
+    except Exception as e:
+        print(f"  [!] Error obteniendo volúmenes: {e}")
+    return volumenes
+
+
 def obtener_precio_rava(ticker: str) -> float | None:
     url = f"https://www.rava.com/perfil/{ticker}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept":     "text/html,application/xhtml+xml",
-        "Referer":    "https://www.rava.com/"
-    }
     try:
-        resp = requests.get(url, headers=headers, timeout=10, verify=False)
+        resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
         if resp.status_code != 200:
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -60,26 +100,38 @@ def obtener_precio_rava(ticker: str) -> float | None:
     except:
         return None
 
-def procesar_cartera(dolar_venta: float) -> list:
+
+def procesar_cartera(dolar_venta: float, volumenes: dict) -> list:
     resultados = []
     for item in CARTERA:
-        precio_ars = obtener_precio_rava(item["ticker_rava"])
+        ticker_db   = item["ticker_db"]
+        ticker_rava = item["ticker_rava"]
+
+        precio_ars = obtener_precio_rava(ticker_rava)
         if not precio_ars:
+            print(f"  [!] {ticker_db}: sin precio")
             continue
-        precio_usd = round(precio_ars / dolar_venta, 4)
+
+        precio_usd     = round(precio_ars / dolar_venta, 4)
+        volumen        = volumenes.get(ticker_rava)
+
+        print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol={volumen}")
+
         resultados.append({
-            "ticker":            item["ticker_db"],
+            "ticker":            ticker_db,
             "fecha":             str(date.today()),
             "precio_cierre":     precio_ars,
             "precio_cierre_ars": precio_ars,
             "precio_cierre_usd": precio_usd,
             "dolar_tipo":        DOLAR_TIPO,
             "dolar_venta":       dolar_venta,
+            "volumen_operado":   volumen,
             "tir":               None,
             "duration":          None,
             "fuente":            f"rava/{DOLAR_TIPO}"
         })
     return resultados
+
 
 def enviar_al_backend(precios: list) -> dict:
     if not precios:
@@ -96,20 +148,36 @@ def enviar_al_backend(precios: list) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 def run() -> dict:
     dolar = obtener_dolar()
     if not dolar:
         return {"ok": False, "error": "No se pudo obtener el dólar"}
-    precios = procesar_cartera(dolar)
+    print(f"  [ok] Dólar {DOLAR_TIPO}: ${dolar}")
+
+    print("\nObteniendo volúmenes del Mapa del Mercado...")
+    volumenes = obtener_volumenes_rava()
+
+    print("\nObteniendo precios desde Rava...")
+    precios = procesar_cartera(dolar, volumenes)
+
+    print("\nEnviando al backend...")
     resultado = enviar_al_backend(precios)
+
     return {
         "ok":        resultado.get("ok", False),
         "insertados": resultado.get("insertados", 0),
         "dolar":     dolar,
-        "precios":   [{"ticker": p["ticker"], "ars": p["precio_cierre_ars"], "usd": p["precio_cierre_usd"]} for p in precios],
+        "precios":   [{"ticker": p["ticker"], "ars": p["precio_cierre_ars"],
+                       "usd": p["precio_cierre_usd"], "volumen": p["volumen_operado"]} for p in precios],
         "error":     resultado.get("error")
     }
 
+
 if __name__ == "__main__":
     import json
-    print(json.dumps(run(), indent=2))
+    print(f"=== Cierre diario {date.today()} ===\n")
+    print("Obteniendo dólar...")
+    resultado = run()
+    print(f"\n=== Resultado ===")
+    print(json.dumps(resultado, indent=2))
