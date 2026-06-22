@@ -121,10 +121,12 @@ def enviar_al_backend(precios: list) -> dict:
     if not precios:
         return {"ok": False, "error": "Sin precios para enviar"}
     try:
+        script_key = os.getenv("SCRIPT_API_KEY", "")
+        #print(f"  [debug] API key: '{script_key}'")
         resp = requests.post(
             f"{API_URL}/api/cartera/precios",
             json=precios,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "x-api-key": script_key},
             timeout=15,
             verify=False
         )
