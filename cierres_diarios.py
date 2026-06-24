@@ -4,11 +4,14 @@ cierres_diarios.py
 Obtiene precios y volumen efectivo de bonos desde Rava Bursátil,
 convierte a USD usando dólar blue/MEP desde dolarapi.com
 y envía los resultados al backend en Railway.
+
+Los tickers se leen dinámicamente desde la base de datos.
 """
 
 import requests
 import warnings
 import re
+import mysql.connector
 from bs4 import BeautifulSoup
 from datetime import date
 from dotenv import load_dotenv
@@ -20,12 +23,6 @@ load_dotenv()
 API_URL    = os.getenv("API_URL", "https://backend-login-production-6dd0.up.railway.app")
 DOLAR_TIPO = os.getenv("DOLAR_TIPO", "blue")
 
-CARTERA = [
-    {"ticker_db": "GD30", "ticker_rava": "GD30"},
-    {"ticker_db": "AL30", "ticker_rava": "AL30"},
-    {"ticker_db": "TX26", "ticker_rava": "TX26"},
-]
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":     "text/html,application/xhtml+xml",
@@ -33,6 +30,45 @@ HEADERS = {
 }
 
 # ─────────────────────────────────────────────────────────────
+def obtener_tickers_db() -> list:
+    """
+    Lee desde la BD todos los tickers activos de tipo bono
+    (bono_usd, bono_ars) que tienen precio en Rava.
+    FCI y Plazo Fijo se cargan manualmente, no se buscan en Rava.
+    """
+    try:
+        conn = mysql.connector.connect(
+            host     = os.getenv("DB_HOST"),
+            port     = int(os.getenv("DB_PORT", 3306)),
+            user     = os.getenv("DB_USER"),
+            password = os.getenv("DB_PASSWORD"),
+            database = os.getenv("DB_NAME"),
+        )
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT ticker FROM especies
+            WHERE activo = TRUE
+            AND tipo IN ('bono_usd', 'bono_ars')
+            ORDER BY ticker
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        tickers = [{"ticker_db": r["ticker"], "ticker_rava": r["ticker"]} for r in rows]
+        print(f"  [ok] BD: {len(tickers)} tickers encontrados → {[t['ticker_db'] for t in tickers]}")
+        return tickers
+
+    except Exception as e:
+        print(f"  [!] Error leyendo BD: {e}")
+        print("  [!] Usando lista de respaldo hardcodeada")
+        return [
+            {"ticker_db": "GD30", "ticker_rava": "GD30"},
+            {"ticker_db": "AL30", "ticker_rava": "AL30"},
+            {"ticker_db": "TX26", "ticker_rava": "TX26"},
+        ]
+
+
 def obtener_dolar() -> float | None:
     try:
         resp = requests.get("https://dolarapi.com/v1/dolares", timeout=10, verify=False)
@@ -48,18 +84,18 @@ def obtener_dolar() -> float | None:
 def obtener_datos_rava(ticker: str) -> dict:
     """
     Scrapea precio y volumen efectivo desde la página de perfil de Rava.
-    Retorna dict con precio y volumen.
     """
     url = f"https://www.rava.com/perfil/{ticker}"
     resultado = {"precio": None, "volumen": None}
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
         if resp.status_code != 200:
+            print(f"  [!] {ticker}: HTTP {resp.status_code}")
             return resultado
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Precio desde og:description: "$97.670,00 (+0,57%)"
+        # Precio desde og:description
         meta = soup.find("meta", {"property": "og:description"})
         if meta:
             content_meta = meta.get("content", "")
@@ -68,7 +104,7 @@ def obtener_datos_rava(ticker: str) -> dict:
                 texto = match.group(1).replace(".", "").replace(",", ".")
                 resultado["precio"] = float(texto)
 
-        # Volumen efectivo desde el HTML: "Vol. Efectivo: 5.149.463.597"
+        # Volumen efectivo
         texto_html = soup.get_text(separator=" ")
         match_vol = re.search(r'Vol\.?\s*Efectivo[:\s]+([\d\.]+)', texto_html)
         if match_vol:
@@ -84,9 +120,9 @@ def obtener_datos_rava(ticker: str) -> dict:
         return resultado
 
 
-def procesar_cartera(dolar_venta: float) -> list:
+def procesar_cartera(cartera: list, dolar_venta: float) -> list:
     resultados = []
-    for item in CARTERA:
+    for item in cartera:
         ticker_db   = item["ticker_db"]
         ticker_rava = item["ticker_rava"]
 
@@ -95,11 +131,11 @@ def procesar_cartera(dolar_venta: float) -> list:
         volumen    = datos["volumen"]
 
         if not precio_ars:
-            print(f"  [!] {ticker_db}: sin precio")
+            print(f"  [!] {ticker_db}: sin precio en Rava")
             continue
 
         precio_usd = round(precio_ars / dolar_venta, 4)
-        print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol_efectivo={volumen}")
+        print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol={volumen}")
 
         resultados.append({
             "ticker":            ticker_db,
@@ -122,7 +158,6 @@ def enviar_al_backend(precios: list) -> dict:
         return {"ok": False, "error": "Sin precios para enviar"}
     try:
         script_key = os.getenv("SCRIPT_API_KEY", "")
-        #print(f"  [debug] API key: '{script_key}'")
         resp = requests.post(
             f"{API_URL}/api/cartera/precios",
             json=precios,
@@ -136,13 +171,16 @@ def enviar_al_backend(precios: list) -> dict:
 
 
 def run() -> dict:
+    print("Leyendo tickers desde la BD...")
+    cartera = obtener_tickers_db()
+
     dolar = obtener_dolar()
     if not dolar:
         return {"ok": False, "error": "No se pudo obtener el dólar"}
     print(f"  [ok] Dólar {DOLAR_TIPO}: ${dolar}")
 
     print("\nObteniendo precios y volúmenes desde Rava...")
-    precios = procesar_cartera(dolar)
+    precios = procesar_cartera(cartera, dolar)
 
     print("\nEnviando al backend...")
     resultado = enviar_al_backend(precios)
@@ -160,7 +198,6 @@ def run() -> dict:
 if __name__ == "__main__":
     import json
     print(f"=== Cierre diario {date.today()} ===\n")
-    print("Obteniendo dólar...")
     resultado = run()
     print(f"\n=== Resultado ===")
     print(json.dumps(resultado, indent=2))
