@@ -32,9 +32,8 @@ HEADERS = {
 # ─────────────────────────────────────────────────────────────
 def obtener_tickers_db() -> list:
     """
-    Lee desde la BD todos los tickers activos de tipo bono
-    (bono_usd, bono_ars) que tienen precio en Rava.
-    FCI y Plazo Fijo se cargan manualmente, no se buscan en Rava.
+    Lee desde la BD todos los tickers activos con precio en Rava.
+    FCI, Plazo Fijo, Cauciones y Saldo Vista se cargan manualmente.
     """
     try:
         conn = mysql.connector.connect(
@@ -48,7 +47,7 @@ def obtener_tickers_db() -> list:
         cursor.execute("""
             SELECT ticker FROM especies
             WHERE activo = TRUE
-            AND tipo IN ('bono_usd', 'bono_ars')
+            AND tipo IN ('bono_usd', 'bono_ars', 'bono_cer', 'bono_dv', 'letra_ars', 'letra_usd', 'on', 'accion', 'cedear')
             ORDER BY ticker
         """)
         rows = cursor.fetchall()
