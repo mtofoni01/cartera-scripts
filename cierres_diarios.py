@@ -233,7 +233,8 @@ def run() -> dict:
         "insertados": resultado.get("insertados", 0),
         "dolar":      dolar,
         "precios":    [{"ticker": p["ticker"], "ars": p["precio_cierre_ars"],
-                        "usd": p["precio_cierre_usd"], "volumen": p["volumen_operado"]} for p in precios],
+                        "usd": p["precio_cierre_usd"], "volumen": p["volumen_operado"],
+                        "tir": p["tir"], "duration": p["duration"]} for p in precios],
         "error":      resultado.get("error")
     }
 
