@@ -119,7 +119,39 @@ def obtener_datos_rava(ticker: str) -> dict:
         return resultado
 
 
-def procesar_cartera(cartera: list, dolar_venta: float) -> list:
+
+COMAFI_URL = "https://www.comafi-inversiones.com.ar/json/main.json"
+
+def obtener_tir_duration_comafi() -> dict:
+    """
+    Obtiene TIR y Modified Duration desde Comafi Inversiones para todos los bonos.
+    Retorna un dict {ticker: {tir, duration}} 
+    """
+    try:
+        resp = requests.get(COMAFI_URL, timeout=15, verify=False,
+                           headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            print(f"  [!] Comafi: HTTP {resp.status_code}")
+            return {}
+        
+        data = resp.json()
+        resultado = {}
+        for item in data.get("assetTable", []):
+            ticker = item.get("assetName", "").upper()
+            tir    = item.get("yield")
+            dur    = item.get("mDur")
+            if ticker and tir is not None:
+                resultado[ticker] = {
+                    "tir":      float(tir),
+                    "duration": float(dur) if dur is not None else None
+                }
+        print(f"  [ok] Comafi: {len(resultado)} bonos con TIR/duration")
+        return resultado
+    except Exception as e:
+        print(f"  [!] Error obteniendo Comafi: {e}")
+        return {}
+
+def procesar_cartera(cartera: list, dolar_venta: float, comafi_data: dict = {}) -> list:
     resultados = []
     for item in cartera:
         ticker_db   = item["ticker_db"]
@@ -134,7 +166,16 @@ def procesar_cartera(cartera: list, dolar_venta: float) -> list:
             continue
 
         precio_usd = round(precio_ars / dolar_venta, 4)
-        print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol={volumen}")
+
+        # Obtener TIR y duration desde Comafi si está disponible
+        comafi = comafi_data.get(ticker_db, {})
+        tir      = comafi.get("tir")
+        duration = comafi.get("duration")
+
+        if tir:
+            print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol={volumen} | TIR={tir}% | MD={duration}")
+        else:
+            print(f"  [ok] {ticker_db}: ARS={precio_ars} | USD={precio_usd} | vol={volumen}")
 
         resultados.append({
             "ticker":            ticker_db,
@@ -145,8 +186,8 @@ def procesar_cartera(cartera: list, dolar_venta: float) -> list:
             "dolar_tipo":        DOLAR_TIPO,
             "dolar_venta":       dolar_venta,
             "volumen_operado":   volumen,
-            "tir":               None,
-            "duration":          None,
+            "tir":               tir,
+            "duration":          duration,
             "fuente":            f"rava/{DOLAR_TIPO}"
         })
     return resultados
@@ -178,8 +219,11 @@ def run() -> dict:
         return {"ok": False, "error": "No se pudo obtener el dólar"}
     print(f"  [ok] Dólar {DOLAR_TIPO}: ${dolar}")
 
+    print("\nObteniendo TIR y duration desde Comafi...")
+    comafi_data = obtener_tir_duration_comafi()
+
     print("\nObteniendo precios y volúmenes desde Rava...")
-    precios = procesar_cartera(cartera, dolar)
+    precios = procesar_cartera(cartera, dolar, comafi_data)
 
     print("\nEnviando al backend...")
     resultado = enviar_al_backend(precios)
